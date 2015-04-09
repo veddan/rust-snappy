@@ -1,6 +1,7 @@
 use std::io::{Write, BufRead};
 use std::io;
 use std::ptr;
+use std::cmp;
 use std::result::Result;
 use util::{native_to_le16, native_to_le32};
 use self::SnappyError::*;
@@ -27,15 +28,34 @@ struct Decompressor<R> {
     read: usize,
 }
 
-macro_rules! try_advance_tag(
+macro_rules! try_advance_tag {
     ($me: expr) => (
         match $me.advance_tag() {
             Ok(None)            => return Ok(()),
             Ok(Some(tag_size))  => tag_size,
-            Err(e)              => return Err(IoError(e))
+            Err(e)              => return Err(e)
         }
     )
-);
+}
+
+macro_rules! read_new_buffer {
+    ($me: expr) => (
+        read_new_buffer!($me, return Ok(None))
+    );
+    ($me: expr, $on_eof: expr) => (
+        match $me.reader.fill_buf() {
+            Err(e) => return Err(IoError(e)),
+            Ok(b) if b.len() == 0 => {
+                $on_eof
+            },
+            Ok(b) => {
+                //println!("[tag] read from reader: {:?} ({} bytes)",
+                            //&b[..cmp::min(11, b.len())], b.len());
+                (b.as_ptr(), b.as_ptr().offset(b.len() as isize))
+            }
+        }
+    );
+}
 
 impl <R: BufRead> Decompressor<R> {
     fn new(reader: R) -> Decompressor<R> {
@@ -48,38 +68,39 @@ impl <R: BufRead> Decompressor<R> {
         }
     }
 
-    // TODO possibly return the tag size?
-    fn advance_tag(&mut self) -> Result<Option<usize>, io::Error> {
+    fn advance_tag(&mut self) -> Result<Option<usize>, SnappyError> {
         unsafe {
             //println!("available: {}", self.available());
             let (buf, buf_end) = if self.available() == 0 {
                 self.reader.consume(self.read);
                 self.read = 0;
-                match self.reader.fill_buf() {
-                    Err(e) => return Err(e),
-                    Ok(b) if b.len() == 0 => {
-                        return Ok(None);
-                    },
-                    Ok(b) => {
-                        //println!("[tag] read from reader: {:?} ({} bytes)",
-                                 //&b[..::std::cmp::min(11, b.len())], b.len());
-                        (b.as_ptr(), b.as_ptr().offset(b.len() as isize))
-                    }
-                }
+                read_new_buffer!(self)
             } else {
                 (self.buf, self.buf_end)
             };
             let c = ptr::read(buf);
             let tag_size = get_tag_size(c) + 1;
-            let remaining = buf_end as usize - buf as usize;
-            if remaining < tag_size {
-                panic!("entire tag didn't fit buffer, {} > {}", tag_size, remaining)
-            } else if remaining < MAX_TAG_LEN {
-                ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), remaining);
+            let mut buf_len = buf_end as usize - buf as usize;
+            if buf_len < tag_size {
+                ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
+                self.reader.consume(self.read);
+                self.read = 0;
+                while buf_len < tag_size {
+                    let (newbuf, newbuf_end) = read_new_buffer!(self, return Err(FormatError));
+                    let newbuf_len = newbuf_end as usize - newbuf as usize;
+                    let to_read = cmp::min(tag_size - buf_len, newbuf_len);  // How many bytes should we read from the new buffer?
+                    ptr::copy_nonoverlapping(newbuf, self.tmp.as_mut_ptr(), to_read);
+                    buf_len += to_read;
+                    self.reader.consume(to_read);
+                }
+                self.buf = self.tmp.as_ptr();
+                self.buf_end = self.buf.offset(buf_len as isize);
+            } else if buf_len < MAX_TAG_LEN {
+                ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
                 self.buf = self.tmp.as_ptr();
-                self.buf_end = self.buf.offset(remaining as isize);
+                self.buf_end = self.buf.offset(buf_len as isize);
             } else {
                 self.buf = buf;
                 self.buf_end = buf_end;
