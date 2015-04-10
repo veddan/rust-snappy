@@ -1,7 +1,7 @@
 extern crate snappy;
 
 use std::io::Cursor;
-use snappy::{compress_with_options, compress, decompress, SnappyWrite, SnappyRead};
+use snappy::{compress, decompress};
 
 static TEXT: &'static str = include_str!("moonstone-short.txt");
 

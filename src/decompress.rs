@@ -191,7 +191,7 @@ impl <R: BufRead> Decompressor<R> {
         self.buf_end as usize - self.buf as usize
     }
 
-    fn get_buf(&self) -> &[u8] {
+    fn _get_buf(&self) -> &[u8] {
         unsafe { ::std::slice::from_raw_parts(self.buf, self.available()) }
     }
 
