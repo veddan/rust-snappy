@@ -3,10 +3,7 @@ use std::io::{BufReader, BufRead, Write};
 use std::io;
 use std::cmp;
 use std::ptr;
-use std::collections::HashMap;
-use std::collections::hash_state::DefaultState;
 use std::slice::Iter;
-use std::hash::Hasher;
 use std::fs::File;
 use util::{native_to_le16, native_to_le32};
 
@@ -49,6 +46,7 @@ impl SnappyRead for BufReader<File> {
 
 /// Small, fixed-size, non-allocating queue of positions of prefixes in the Dict.
 /// When a new element is added, the oldest is removed.
+#[derive(Clone)]
 struct PositionQueue {
     queue: [u32; MAX_CHAIN_LEN as usize],
     len: u8
@@ -107,42 +105,67 @@ impl Default for CompressorOptions {
     }
 }
 
-struct FastHasher {
-    state: u32
+struct LossyHashTable {
+    table: Vec<([u8; MIN_COPY_LEN], PositionQueue)>
 }
 
-impl Default for FastHasher {
-    fn default() -> FastHasher {
-        FastHasher {
-            state: 0
+impl LossyHashTable {
+    fn new(capacity: u32) -> LossyHashTable {
+        LossyHashTable {
+            table:vec![([0, 0, 0, 0], PositionQueue::new()); capacity as usize]
         }
     }
-}
 
-impl Hasher for FastHasher {
-    fn finish(&self) -> u64 { self.state as u64 }
+    fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u32) -> Option<&'a mut PositionQueue> {
+        debug_assert_eq!(key.len(), MIN_COPY_LEN);
+        let idx = self.hash(key);
+        let &mut (ref mut stored_key, ref mut queue) = &mut self.table[idx];
+        if queue.len() != 0 && &stored_key[..] == key {
+            return Some(queue);
+        } else {
+            stored_key[0] = key[0];
+            stored_key[1] = key[1];
+            stored_key[2] = key[2];
+            stored_key[3] = key[3];
+            queue.len = 0;
+            queue.push(pos);
+            return None;
+        }
+    }
+
+    fn clear(&mut self) {
+        for e in self.table.iter_mut() {
+            e.1.len = 0;
+        }
+    }
 
     // Rovert Sedgewick's string hashing algorithm
-    fn write(&mut self, bytes: &[u8]) {
-        let mut a = 63689;
-        let b = 378551;
-        for &x in bytes.iter() {
-            self.state = self.state.wrapping_mul(a);
-            self.state = self.state.wrapping_add(x as u32);
-            a = a.wrapping_mul(b);
-        }
+    fn hash(&self, bytes: &[u8]) -> usize {
+        let mut hash = 0u32;
+        let mut a = 63689u32;
+        let b = 378551u32;
+        hash = hash.wrapping_add(bytes[0] as u32);
+        a = a.wrapping_mul(b);
+        hash = hash.wrapping_mul(a);
+        hash = hash.wrapping_add(bytes[1] as u32);
+        a = a.wrapping_mul(b);
+        hash = hash.wrapping_mul(a);
+        hash = hash.wrapping_add(bytes[2] as u32);
+        a = a.wrapping_mul(b);
+        hash = hash.wrapping_mul(a);
+        hash = hash.wrapping_add(bytes[3] as u32);
+        (hash % self.table.len() as u32) as usize
     }
 }
 
 struct Dict {
-    table: HashMap<[u8; MIN_COPY_LEN], PositionQueue, DefaultState<FastHasher>>
+    table: LossyHashTable
 }
 
 impl Dict {
     fn new(capacity: u32) -> Dict {
         Dict {
-            table: HashMap::with_capacity_and_hash_state(capacity as usize,
-                                                         DefaultState::<FastHasher>::default())
+             table: LossyHashTable::new(capacity)
         }
     }
 
@@ -152,13 +175,10 @@ impl Dict {
 
     fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u8)> {
         let prefix = &block[start..start + MIN_COPY_LEN];
-        let key = [prefix[0], prefix[1], prefix[2],prefix[3]];
-        let mut found = true;
-        let positions = self.table.entry(key).or_insert_with(|| { found = false; PositionQueue::new() });
-        if !found {
-            positions.push(start as u32);
-            return None;
-        }
+        let positions = match self.table.get_or_insert(prefix, start as u32) {
+            None     => return None,
+            Some(ps) => ps
+        };
 
         let mut best_pos;
         let mut best_len;
