@@ -13,7 +13,7 @@ use util::{native_to_le16, native_to_le32};
 const LITERAL: u8 = 0;
 const COPY_1_BYTE: u8 = 1;
 const COPY_2_BYTE: u8 = 2;
-const COPY_3_BYTE: u8 = 3;
+const COPY_4_BYTE: u8 = 3;
 
 const MIN_COPY_LEN: usize = 4;
 const MAX_COPY_LEN: usize = 64;
@@ -295,7 +295,10 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
         try!(out.write(&[tag]));
         try!(write_u16_le(out, offset as u16));
     } else {
-        panic!("<copy (4-byte) len={} offset={}>", len, offset)
+        let n = len - 1;
+        let tag = (n << 2) | COPY_4_BYTE;
+        try!(out.write(&[tag]));
+        try!(write_u32_le(out, offset as u32));
     }
     Ok(())
 }
@@ -385,20 +388,20 @@ fn write_varint<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use super::{write_varint, emit_literal};
+    use super::{write_varint, emit_literal, emit_copy};
 
     #[test]
     fn test_write_varint_short() {
         let mut v = Vec::new();
         write_varint(&mut v, 64).unwrap();
-        debug_assert_eq!(&v[..], &[64])
+        assert_eq!(&v[..], &[64])
     }
 
     #[test]
     fn test_write_varint_long() {
         let mut v = Vec::new();
         write_varint(&mut v, 2097150).unwrap();
-        debug_assert_eq!(&v[..], &[0xFE, 0xFF, 0x7F])
+        assert_eq!(&v[..], &[0xFE, 0xFF, 0x7F])
     }
 
     #[test]
@@ -406,8 +409,8 @@ mod test {
         let mut out = Vec::new();
         let literal = &[1, 2, 3, 4, 5, 6, 7];
         emit_literal(&mut out, literal).unwrap();
-        debug_assert_eq!(out[0], 0b000110_00);
-        debug_assert_eq!(&out[1..], literal);
+        assert_eq!(out[0], 0b000110_00);
+        assert_eq!(&out[1..], literal);
     }
 
     #[test]
@@ -415,8 +418,8 @@ mod test {
         let mut out = Vec::new();
         let literal: Vec<u8> = (0..100).collect();
         emit_literal(&mut out, &literal[..]).unwrap();
-        debug_assert_eq!(&out[..2], &[0b111100_00, (literal.len() - 1) as u8]);
-        debug_assert_eq!(&out[2..], &literal[..]);
+        assert_eq!(&out[..2], &[0b111100_00, (literal.len() - 1) as u8]);
+        assert_eq!(&out[2..], &literal[..]);
     }
 
     #[ignore]
@@ -425,7 +428,14 @@ mod test {
         let mut out = Vec::new();
         let literal: Vec<u8> = (0..16_777_218).map(|i| (i % 100) as u8).collect();
         emit_literal(&mut out, &literal[..]).unwrap();
-        debug_assert_eq!(&out[..5], &[0b111111_00, 0x01, 0x00, 0x00, 0x01]);
-        debug_assert_eq!(&out[5..], &literal[..]);
+        assert_eq!(&out[..5], &[0b111111_00, 0x01, 0x00, 0x00, 0x01]);
+        assert_eq!(&out[5..], &literal[..]);
+    }
+
+    #[test]
+    fn test_emit_copy_large() {
+        let mut out = Vec::new();
+        emit_copy(&mut out, 120_000, 40).unwrap();
+        assert_eq!(&out[..], &[0b100111_11, 0xC0, 0xD4, 0x01, 0x00]);
     }
 }
