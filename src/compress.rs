@@ -120,7 +120,7 @@ impl LossyHashTable {
         debug_assert_eq!(key.len(), MIN_COPY_LEN);
         let idx = self.hash(key);
         let &mut (ref mut stored_key, ref mut queue) = &mut self.table[idx];
-        if queue.len() != 0 && &stored_key[..] == key {
+        if queue.len() != 0 && LossyHashTable::key_eq(stored_key, key) {
             return Some(queue);
         } else {
             stored_key[0] = key[0];
@@ -131,6 +131,13 @@ impl LossyHashTable {
             queue.push(pos);
             return None;
         }
+    }
+
+    fn key_eq(stored_key: &[u8; MIN_COPY_LEN], key: &[u8]) -> bool {
+        stored_key[0] == key[0] &&
+        stored_key[1] == key[1] &&
+        stored_key[2] == key[2] &&
+        stored_key[3] == key[3]
     }
 
     fn clear(&mut self) {
@@ -182,13 +189,14 @@ impl Dict {
 
         let mut best_pos;
         let mut best_len;
+        let tail = &block[start..];
         {
             let mut posit = positions.iter();
             best_pos = *posit.next().unwrap();
-            best_len = common_prefix_length(&block[best_pos as usize..], &block[start..]);
+            best_len = common_prefix_length(&block[best_pos as usize..], tail);
             for &pos in posit {
                 if best_len == MAX_COPY_LEN as u8 { break; }
-                let len = common_prefix_length(&block[pos as usize..], &block[start..]);
+                let len = common_prefix_length(&block[pos as usize..], tail);
                 if len > best_len {
                     best_pos = pos;
                     best_len = len;
@@ -312,13 +320,13 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
         let mut n = len;
         let mut count = 0;
         while n > 0 {
-            ds[count] = (n & 0xFF) as u8;
+            ds[count + 1] = (n & 0xFF) as u8;
             n >>= 8;
             count += 1;
         }
         let tag = (((59 + count) as u8) << 2) | LITERAL;
-        try!(out.write(&[tag]));
-        try!(out.write(&ds[..count]));
+        ds[0] = tag;
+        try!(out.write(&ds[..count + 1]));
         try!(out.write_all(literal));
     }
     Ok(())
