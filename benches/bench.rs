@@ -1,10 +1,12 @@
 #![feature(test)]
 
 extern crate test;
+extern crate rand;
 extern crate snappy;
 
 use std::io::Cursor;
-use snappy::{compress_with_options, compress, decompress};
+use rand::{weak_rng, Rng};
+use snappy::{compress, decompress};
 
 static TEXT: &'static str = include_str!("../tests/moonstone-short.txt");
 
@@ -38,10 +40,21 @@ macro_rules! compress(
 #[bench]
 fn bench_compress_text(bench: &mut test::Bencher) {
     bench.iter(|| {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(TEXT.len());
         compress!(TEXT.as_bytes(), &mut out);
     });
     bench.bytes = TEXT.len() as u64;
+}
+
+#[bench]
+fn bench_compress_random(bench: &mut test::Bencher) {
+    let mut rng = weak_rng();
+    let input: Vec<u8> = (0..TEXT.len()).map(|_| rng.gen()).collect();
+    bench.iter(|| {
+        let mut out = Vec::with_capacity(input.len());
+        compress!(&input[..], &mut out);
+    });
+    bench.bytes = input.len() as u64;
 }
 
 #[bench]
@@ -49,7 +62,7 @@ fn bench_decompress_text(bench: &mut test::Bencher) {
     let mut compressed = Vec::new();
     compress!(TEXT.as_bytes(), &mut compressed);
     bench.iter(|| {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(TEXT.len());
         decompress!(compressed[..], &mut out);
     });
     bench.bytes = TEXT.len() as u64;
