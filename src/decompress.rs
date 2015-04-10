@@ -68,23 +68,30 @@ impl <R: BufRead> Decompressor<R> {
 
     fn advance_tag(&mut self) -> Result<Option<usize>, SnappyError> {
         unsafe {
-            let (buf, buf_end) = if self.available() == 0 {
+            let buf;
+            let buf_end;
+            let mut buf_len;
+            if self.available() == 0 {
                 self.reader.consume(self.read);
-                self.read = 0;
-                read_new_buffer!(self)
+                let (b, be) = read_new_buffer!(self);
+                buf = b;
+                buf_end = be;
+                buf_len = buf_end as usize - buf as usize;
+                self.read = buf_len;
             } else {
-                (self.buf, self.buf_end)
+                buf = self.buf;
+                buf_end = self.buf_end;
+                buf_len = self.available();
             };
             let c = ptr::read(buf);
             let tag_size = get_tag_size(c) + 1;
-            let mut buf_len = buf_end as usize - buf as usize;
             if buf_len < tag_size {
                 ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
                 while buf_len < tag_size {
                     let (newbuf, newbuf_end) = read_new_buffer!(self,
-                            return Err(FormatError("premature EOF while readig tag")));
+                            return Err(FormatError("EOF while reading tag")));
                     let newbuf_len = newbuf_end as usize - newbuf as usize;
                     let to_read = cmp::min(tag_size - buf_len, newbuf_len);  // How many bytes should we read from the new buffer?
                     ptr::copy_nonoverlapping(newbuf, self.tmp.as_mut_ptr(), to_read);
@@ -109,17 +116,18 @@ impl <R: BufRead> Decompressor<R> {
 
     fn decompress<W: SnappyWrite>(&mut self, writer: &mut W) -> Result<(), SnappyError> {
         loop {
-            let _tag_size = try_advance_tag!(self);
+            let tag_size = try_advance_tag!(self);
+            println!("tag_size = {}", tag_size);
             let c = self.read(1)[0];
             if c & 0x03 == 0 {  // literal
-                let lenbits = ((c & !0x03) >> 2) + 1;
-                let literal_len = if lenbits <= 60 {  // TODO use tag_size
-                    lenbits as u32
+                let literal_len = if tag_size == 1 {
+                    ((c >> 2) as u32) + 1
                 } else {
-                    let literal_len_bytes = lenbits - 60;
-                    let n = self.read_u32_le(literal_len_bytes) + 1;
-                    n
+                    let literal_len_bytes = (tag_size - 1) as u8;
+                    self.read_u32_le(literal_len_bytes) + 1
                 };
+                println!("D: <literal len={}>", literal_len);
+                println!("D: buf: {:?} ({} bytes)", self.get_buf(), self.available());
                 let mut remaining = literal_len as usize;
                 while self.available() < remaining {
                     let available = self.available();
@@ -129,10 +137,12 @@ impl <R: BufRead> Decompressor<R> {
                     };
                     remaining -= available;
                     self.reader.consume(self.read);
+                    println!("read: {}", self.read);
                     match self.reader.fill_buf() {
                         Err(e) => return Err(IoError(e)),
                         Ok(b) if b.len() == 0 => {
-                            return Err(FormatError("premature EOF while reading literal"));
+                            println!("empty buffer while reading literal, {} remaining", remaining);
+                            return Err(FormatError("EOF while reading literal"));
                         },
                         Ok(b) => {
                             self.buf = b.as_ptr();
@@ -146,11 +156,11 @@ impl <R: BufRead> Decompressor<R> {
                     Err(e) => return Err(IoError(e))
                 };
             } else {  // copy
-                let (copy_len, copy_offset) = if _tag_size == 2 {
+                let (copy_len, copy_offset) = if tag_size == 2 {
                     let len = 4 + ((c & 0x1C) >> 2);
                     let offset = (((c & 0xE0) as u32) << 3) | self.read(1)[0] as u32;
                     (len, offset)
-                } else if _tag_size == 3 {
+                } else if tag_size == 3 {
                     let len = 1 + (c >> 2);
                     let offset = self.read_u16_le() as u32;
                     (len, offset)
@@ -159,7 +169,8 @@ impl <R: BufRead> Decompressor<R> {
                     let offset = self.read_u32_le(4);
                     (len, offset)
                 };
-                if copy_offset == 0 {  // zero-length copies can't be encoded, no need to check
+                println!("D: <copy len={} offset={}>", copy_len, copy_offset);
+                if copy_offset == 0 {  // zero-length copies can't be encoded, no need to check for them
                     return Err(FormatError("zero-length offset"));
                 }
                 match writer.write_from_self(copy_offset as usize, copy_len as usize) {
@@ -173,9 +184,13 @@ impl <R: BufRead> Decompressor<R> {
     fn read(&mut self, n: usize) -> &[u8] {
         assert!(n as usize <= self.available());
         let r = unsafe { ::std::slice::from_raw_parts(self.buf, n) };
-        self.read += n as usize;
-        self.buf = unsafe { self.buf.offset(n as isize) };
+        self.advance(n);
         return r;
+    }
+
+    fn advance(&mut self, n: usize) {
+        assert!(self.available() >= n);
+        self.buf = unsafe { self.buf.offset(n as isize) };
     }
 
     fn available(&self) -> usize {
@@ -187,10 +202,10 @@ impl <R: BufRead> Decompressor<R> {
     }
 
     fn read_u32_le(&mut self, bytes: u8) -> u32 {
-        const MASKS: &'static [u32] = &[0, 0xFF000000, 0xFFFF0000, 0xFFFFFF00, 0xFFFFFFFF];
-        let p = self.read(4).as_ptr() as *const u32;
-        let x = unsafe { ptr::read(p) } & MASKS[bytes as usize];
-        return native_to_le32(x);
+        const MASKS: &'static [u32] = &[0, 0x000000FF, 0x0000FFFF, 0x00FFFFFF, 0xFFFFFFFF];
+        let p = self.buf as *const u32;
+        self.advance(bytes as usize);
+        native_to_le32(unsafe { ptr::read(p) }) & MASKS[bytes as usize]
     }
 
     fn read_u16_le(&mut self) -> u16 {

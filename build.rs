@@ -14,11 +14,11 @@ fn main() {
     loop {
         let n = match c & 0x03 {
             0b00 => {  // literal
-                let len = (c as u32 & !0x03) >> 2 + 1;
-                if len <= 60 {
+                let n = c >> 2;
+                if n < 60 {
                     0
                 } else {
-                    len - 60
+                    n - 59
                 }
             },
             0b01 => 1,  // copy with 1-byte offset
