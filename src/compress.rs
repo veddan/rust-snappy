@@ -2,10 +2,12 @@ use std::default::Default;
 use std::io::{BufReader, BufRead, Write};
 use std::io;
 use std::cmp;
+use std::ptr;
 use std::collections::HashMap;
+use std::collections::hash_state::DefaultState;
+use std::slice::Iter;
 use std::hash::Hasher;
 use std::fs::File;
-use std::collections::hash_state::DefaultState;
 use util::{native_to_le16, native_to_le32};
 
 const LITERAL: u8 = 0;
@@ -17,6 +19,9 @@ const MIN_COPY_LEN: usize = 4;
 const MAX_COPY_LEN: usize = 64;
 
 const BLOCK_MARGIN: usize = 16;
+
+/// Maximum number of positions stored for one prefix. Must not be 0.
+const MAX_CHAIN_LEN: u8 = 3;
 
 pub trait SnappyRead : BufRead {
     /// Returns the total number of bytes left to be read.
@@ -42,16 +47,62 @@ impl SnappyRead for BufReader<File> {
     }
 }
 
+/// Small, fixed-size, non-allocating queue of positions of prefixes in the Dict.
+/// When a new element is added, the oldest is removed.
+struct PositionQueue {
+    queue: [u32; MAX_CHAIN_LEN as usize],
+    len: u8
+}
+
+impl PositionQueue {
+    fn new() -> PositionQueue {
+        PositionQueue {
+            queue: [0; MAX_CHAIN_LEN as usize],
+            len: 0
+        }
+    }
+
+    fn iter<'a>(&'a self) -> Iter<'a, u32> {
+        self.queue[..self.len()].iter()
+    }
+
+    fn push(&mut self, pos: u32) {
+        if self.len > 0 && MAX_CHAIN_LEN > 1 {
+            if MAX_CHAIN_LEN == 2 {
+                self.queue[1] = self.queue[0];
+            } else if MAX_CHAIN_LEN == 3 {
+                self.queue[2] = self.queue[1];
+                self.queue[1] = self.queue[0];
+            } else if MAX_CHAIN_LEN == 4 {
+                self.queue[3] = self.queue[2];
+                self.queue[2] = self.queue[1];
+                self.queue[1] = self.queue[0];
+            } else if MAX_CHAIN_LEN == 5 {
+                self.queue[4] = self.queue[3];
+                self.queue[3] = self.queue[2];
+                self.queue[2] = self.queue[1];
+                self.queue[1] = self.queue[0];
+            } else {
+                unsafe {
+                    ptr::copy(self.queue.as_ptr(), self.queue.as_mut_ptr().offset(1), self.len())
+                }
+            }
+        }
+        self.queue[0] = pos;
+        self.len = cmp::min(self.len + 1, MAX_CHAIN_LEN);
+    }
+
+    fn len(&self) -> usize { self.len as usize }
+}
+
 pub struct CompressorOptions {
     pub block_size: u32,
-    pub max_chain_len: usize,
 }
 
 impl Default for CompressorOptions {
     fn default() -> CompressorOptions {
         CompressorOptions {
             block_size: 65536,
-            max_chain_len: 5,
         }
     }
 }
@@ -84,7 +135,7 @@ impl Hasher for FastHasher {
 }
 
 struct Dict {
-    table: HashMap<[u8; MIN_COPY_LEN], Vec<u32>, DefaultState<FastHasher>>
+    table: HashMap<[u8; MIN_COPY_LEN], PositionQueue, DefaultState<FastHasher>>
 }
 
 impl Dict {
@@ -115,44 +166,38 @@ impl Dict {
         let mut sorted_histogram: Vec<_> = histogram.iter().collect();
         sorted_histogram.sort_by(|&(n1, _), &(n2, _)| n1.cmp(n2));
         for &(size, count) in sorted_histogram.iter() {
-            writeln!(io::stderr(), "{}:\t{}", size, count);
+            writeln!(io::stderr(), "{}:\t{}", size, count).unwrap();
         }
-        writeln!(io::stderr(), "len = {}, capacity = {}", self.table.len(), self.table.capacity());
+        writeln!(io::stderr(), "len = {}, capacity = {}", self.table.len(), self.table.capacity()).unwrap();
     }
 
-    fn find_best_match_or_add(&mut self, block: &[u8], start: usize, options: &CompressorOptions)
-                                -> Option<(u32, u8)> {
+    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u8)> {
         let prefix = &block[start..start + MIN_COPY_LEN];
         let key = [prefix[0], prefix[1], prefix[2],prefix[3]];
         let mut found = true;
-        let positions = self.table.entry(key).or_insert_with(|| { found = false; Vec::with_capacity(3) });
-        if positions.len() < options.max_chain_len {
-            positions.push(start as u32);
-            positions.sort_by(|a, b| b.cmp(a));
-        }
+        let positions = self.table.entry(key).or_insert_with(|| { found = false; PositionQueue::new() });
         if !found {
+            positions.push(start as u32);
             return None;
         }
 
-        assert!(positions.len() > 0);
-
-        let mut posit = positions.iter();
-        let mut best_pos = *posit.next().unwrap();
-        let match_len = common_prefix_length(&block[best_pos as usize..start], &block[start..]);
-        let mut best_len = cmp::min(MAX_COPY_LEN as u8, match_len);
-        for &pos in posit {
-            let len = common_prefix_length(&block[pos as usize..start], &block[start..]);
-            if len > best_len {
-                best_pos = pos;
-                best_len = len;
-                if len == MAX_COPY_LEN as u8 { break; }
+        let mut best_pos;
+        let mut best_len;
+        {
+            let mut posit = positions.iter();
+            best_pos = *posit.next().unwrap();
+            best_len = common_prefix_length(&block[best_pos as usize..], &block[start..]);
+            for &pos in posit {
+                if best_len == MAX_COPY_LEN as u8 { break; }
+                let len = common_prefix_length(&block[pos as usize..], &block[start..]);
+                if len > best_len {
+                    best_pos = pos;
+                    best_len = len;
+                }
             }
         }
-        if best_len >= MIN_COPY_LEN as u8 {
-            Some((best_pos, best_len))
-        } else {
-            None
-        }
+        positions.push(start as u32);
+        Some((best_pos, best_len))
     }
 }
 
@@ -164,10 +209,10 @@ pub fn compress<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W) -> io::Result
 #[inline(never)]
 pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
                                                    options: &CompressorOptions) -> io::Result<()> {
-    assert!(inp.available().unwrap() <= ::std::u32::MAX as u64);
+    debug_assert!(inp.available().unwrap() <= ::std::u32::MAX as u64);
     let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
-    let mut dict = Dict::new(options.block_size / 6);  // TODO Figure out capacity
+    let mut dict = Dict::new(options.block_size / 7);  // TODO Figure out capacity
     loop {
         let mut len;
         {
@@ -178,7 +223,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
             };
             len = buf.len();
             for chunk in buf.chunks(options.block_size as usize) {
-                try!(compress_block(chunk, out, &mut dict, options));
+                try!(compress_block(chunk, out, &mut dict));
                 dict.clear();
             }
         }
@@ -186,7 +231,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     }
 }
 
-fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options: &CompressorOptions)
+fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
                              -> io::Result<()> {
     if block.len() < BLOCK_MARGIN {  // Too short to bother with copies.
         return emit_literal(out, block);
@@ -198,7 +243,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
         let mut copy_offset;
         let mut copy_len;
         loop {
-            match dict.find_best_match_or_add(block, i, options) {
+            match dict.find_best_match_or_add(block, i) {
                 None => {},
                 Some((pos, len)) => {
                     copy_offset = i as u32 - pos;
@@ -218,7 +263,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
             try!(emit_copy(out, copy_offset, copy_len));
             literal_start = i;
             if i >= imax { break 'outer; }
-            match dict.find_best_match_or_add(block, i, options) {
+            match dict.find_best_match_or_add(block, i) {
                 None => break,
                 Some((pos, len)) => {
                     copy_offset = i as u32 - pos;
@@ -236,8 +281,8 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
 }
 
 fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
-    assert!(len > 0);
-    assert!(len <= MAX_COPY_LEN as u8);
+    debug_assert!(len > 0);
+    debug_assert!(len <= MAX_COPY_LEN as u8);
     //writeln!(io::stderr(), "<copy len={} offset={}>", len, offset);
     if len <= 11 && offset <= 2047 {
         let n = len - 4;
@@ -256,7 +301,7 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
 }
 
 fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
-    assert!(literal.len() < ::std::u32::MAX as usize);
+    debug_assert!(literal.len() < ::std::u32::MAX as usize);
     //writeln!(io::stderr(), "<literal len={}> \"{}\"", literal.len(), String::from_utf8_lossy(literal));
     let len = literal.len() - 1;
     if len < 60 {
@@ -280,10 +325,14 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn common_prefix_length<T: Eq>(a: &[T], b: &[T]) -> u8 {
+/// Find the length of the common prefix of a and b.
+/// Will not return more than MAX_COPY_LEN.
+/// Assumes that the common prefix is at least MIN_COPY_LEN.
+fn common_prefix_length(a: &[u8], b: &[u8]) -> u8 {
+    debug_assert_eq!(&a[..MIN_COPY_LEN], &b[..MIN_COPY_LEN]);
     let n = cmp::min(a.len(), b.len());
-    let mut i = 0;
-    while i < n && a[i] == b[i] && i <  MAX_COPY_LEN { i += 1; }
+    let mut i = MIN_COPY_LEN;
+    while i < n && a[i] == b[i] && i < MAX_COPY_LEN { i += 1; }
     return i as u8;
 }
 
@@ -342,14 +391,14 @@ mod test {
     fn test_write_varint_short() {
         let mut v = Vec::new();
         write_varint(&mut v, 64).unwrap();
-        assert_eq!(&v[..], &[64])
+        debug_assert_eq!(&v[..], &[64])
     }
 
     #[test]
     fn test_write_varint_long() {
         let mut v = Vec::new();
         write_varint(&mut v, 2097150).unwrap();
-        assert_eq!(&v[..], &[0xFE, 0xFF, 0x7F])
+        debug_assert_eq!(&v[..], &[0xFE, 0xFF, 0x7F])
     }
 
     #[test]
@@ -357,8 +406,8 @@ mod test {
         let mut out = Vec::new();
         let literal = &[1, 2, 3, 4, 5, 6, 7];
         emit_literal(&mut out, literal).unwrap();
-        assert_eq!(out[0], 0b000110_00);
-        assert_eq!(&out[1..], literal);
+        debug_assert_eq!(out[0], 0b000110_00);
+        debug_assert_eq!(&out[1..], literal);
     }
 
     #[test]
@@ -366,8 +415,8 @@ mod test {
         let mut out = Vec::new();
         let literal: Vec<u8> = (0..100).collect();
         emit_literal(&mut out, &literal[..]).unwrap();
-        assert_eq!(&out[..2], &[0b111100_00, (literal.len() - 1) as u8]);
-        assert_eq!(&out[2..], &literal[..]);
+        debug_assert_eq!(&out[..2], &[0b111100_00, (literal.len() - 1) as u8]);
+        debug_assert_eq!(&out[2..], &literal[..]);
     }
 
     #[ignore]
@@ -376,7 +425,7 @@ mod test {
         let mut out = Vec::new();
         let literal: Vec<u8> = (0..16_777_218).map(|i| (i % 100) as u8).collect();
         emit_literal(&mut out, &literal[..]).unwrap();
-        assert_eq!(&out[..5], &[0b111111_00, 0x01, 0x00, 0x00, 0x01]);
-        assert_eq!(&out[5..], &literal[..]);
+        debug_assert_eq!(&out[..5], &[0b111111_00, 0x01, 0x00, 0x00, 0x01]);
+        debug_assert_eq!(&out[5..], &literal[..]);
     }
 }
