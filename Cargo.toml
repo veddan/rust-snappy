@@ -3,3 +3,8 @@ name = "snappy"
 version = "0.0.1"
 authors = ["Viktor Dahl <pazaconyoman@gmail.com>"]
 build = "build.rs"
+
+[dev-dependencies]
+rand = "*"
+docopt = "*"
+rustc-serialize = "*" 
