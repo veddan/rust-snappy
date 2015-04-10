@@ -146,29 +146,8 @@ impl Dict {
         }
     }
 
-    #[cfg(not(debug_assertions))]
     fn clear(&mut self) {
         self.table.clear();
-    }
-
-    #[cfg(debug_assertions)]
-    fn clear(&mut self) {
-        self.dump_sizes();
-        self.table.clear();
-    }
-
-    #[cfg(debug_assertions)]
-    fn dump_sizes(&self) {
-        let mut histogram = HashMap::new();
-        for positions in self.table.values() {
-            *histogram.entry(positions.len()).or_insert(0) += 1;
-        }
-        let mut sorted_histogram: Vec<_> = histogram.iter().collect();
-        sorted_histogram.sort_by(|&(n1, _), &(n2, _)| n1.cmp(n2));
-        for &(size, count) in sorted_histogram.iter() {
-            writeln!(io::stderr(), "{}:\t{}", size, count).unwrap();
-        }
-        writeln!(io::stderr(), "len = {}, capacity = {}", self.table.len(), self.table.capacity()).unwrap();
     }
 
     fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u8)> {
@@ -255,7 +234,6 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
             if i >= imax { break 'outer; }
         }
 
-        //writeln!(io::stderr(), "literal_start = {}, i = {}", literal_start, i);
         try!(emit_literal(out, &block[literal_start..i]));
 
         loop {
@@ -283,7 +261,6 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
 fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
     debug_assert!(len > 0);
     debug_assert!(len <= MAX_COPY_LEN as u8);
-    //writeln!(io::stderr(), "<copy len={} offset={}>", len, offset);
     if len <= 11 && offset <= 2047 {
         let n = len - 4;
         let tag = (n << 2) | COPY_1_BYTE | ((offset >> 3) & 0xE0) as u8;
@@ -305,7 +282,6 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
 
 fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
     debug_assert!(literal.len() < ::std::u32::MAX as usize);
-    //writeln!(io::stderr(), "<literal len={}> \"{}\"", literal.len(), String::from_utf8_lossy(literal));
     let len = literal.len() - 1;
     if len < 60 {
         let tag = ((len as u8) << 2) | LITERAL;
