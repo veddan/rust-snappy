@@ -1,8 +1,11 @@
 use std::default::Default;
-use std::io::{BufRead, Write};
+use std::io::{BufReader, BufRead, Write};
 use std::io;
 use std::cmp;
 use std::collections::HashMap;
+use std::hash::Hasher;
+use std::fs::File;
+use std::collections::hash_state::DefaultState;
 use util::{native_to_le16, native_to_le32};
 
 const LITERAL: u8 = 0;
@@ -17,41 +20,78 @@ const BLOCK_MARGIN: usize = 16;
 
 pub trait SnappyRead : BufRead {
     /// Returns the total number of bytes left to be read.
-    fn available(&self) -> u64;
+    fn available(&self) -> io::Result<u64>;
 }
 
 impl <'a> SnappyRead for io::Cursor<&'a [u8]> {
-    fn available(&self) -> u64 { self.get_ref().len() as u64 - self.position() }
+    fn available(&self) -> io::Result<u64> { Ok(self.get_ref().len() as u64 - self.position()) }
 }
 
 impl <'a> SnappyRead for io::Cursor<&'a mut [u8]> {
-    fn available(&self) -> u64 { self.get_ref().len() as u64 - self.position() }
+    fn available(&self) -> io::Result<u64>{ Ok(self.get_ref().len() as u64 - self.position()) }
 }
 
-impl <'a> SnappyRead for io::Cursor<Vec<u8>> {
-    fn available(&self) -> u64 { self.get_ref().len() as u64 - self.position() }
+impl SnappyRead for io::Cursor<Vec<u8>> {
+    fn available(&self) -> io::Result<u64> { Ok(self.get_ref().len() as u64 - self.position()) }
+}
+
+impl SnappyRead for BufReader<File> {
+    fn available(&self) -> io::Result<u64> {
+        let metadata = try!(self.get_ref().metadata());
+        Ok(metadata.len())
+    }
 }
 
 pub struct CompressorOptions {
-    block_size: u32,
+    pub block_size: u32,
+    pub max_chain_len: usize,
 }
 
 impl Default for CompressorOptions {
     fn default() -> CompressorOptions {
         CompressorOptions {
-            block_size: 65536,  // Seems to be a popular buffer size
+            block_size: 65536,
+            max_chain_len: 5,
+        }
+    }
+}
+
+struct FastHasher {
+    state: u32
+}
+
+impl Default for FastHasher {
+    fn default() -> FastHasher {
+        FastHasher {
+            state: 0
+        }
+    }
+}
+
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 { self.state as u64 }
+
+    // Rovert Sedgewick's string hashing algorithm
+    fn write(&mut self, bytes: &[u8]) {
+        let mut a = 63689;
+        let b = 378551;
+        for &x in bytes.iter() {
+            self.state = self.state.wrapping_mul(a);
+            self.state = self.state.wrapping_add(x as u32);
+            a = a.wrapping_mul(b);
         }
     }
 }
 
 struct Dict {
-    table: HashMap<[u8; MIN_COPY_LEN], Vec<u32>>
+    table: HashMap<[u8; MIN_COPY_LEN], Vec<u32>, DefaultState<FastHasher>>
 }
 
 impl Dict {
-    fn new(capacity: usize) -> Dict {
+    fn new(capacity: u32) -> Dict {
         Dict {
-            table: HashMap::with_capacity(capacity)
+            table: HashMap::with_capacity_and_hash_state(capacity as usize,
+                                                         DefaultState::<FastHasher>::default())
         }
     }
 
@@ -72,20 +112,25 @@ impl Dict {
         for positions in self.table.values() {
             *histogram.entry(positions.len()).or_insert(0) += 1;
         }
-        for (size, count) in histogram.iter() {
-            println!("{}:\t{}", size, count);
+        let mut sorted_histogram: Vec<_> = histogram.iter().collect();
+        sorted_histogram.sort_by(|&(n1, _), &(n2, _)| n1.cmp(n2));
+        for &(size, count) in sorted_histogram.iter() {
+            writeln!(io::stderr(), "{}:\t{}", size, count);
         }
-        println!("len = {}, capacity = {}", self.table.len(), self.table.capacity());
+        writeln!(io::stderr(), "len = {}, capacity = {}", self.table.len(), self.table.capacity());
     }
 
-    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u8)> {
+    fn find_best_match_or_add(&mut self, block: &[u8], start: usize, options: &CompressorOptions)
+                                -> Option<(u32, u8)> {
         let prefix = &block[start..start + MIN_COPY_LEN];
         let key = [prefix[0], prefix[1], prefix[2],prefix[3]];
         let mut found = true;
         let positions = self.table.entry(key).or_insert_with(|| { found = false; Vec::with_capacity(3) });
-        if !found {
+        if positions.len() < options.max_chain_len {
             positions.push(start as u32);
             positions.sort_by(|a, b| b.cmp(a));
+        }
+        if !found {
             return None;
         }
 
@@ -93,18 +138,21 @@ impl Dict {
 
         let mut posit = positions.iter();
         let mut best_pos = *posit.next().unwrap();
-        let mut best_len = common_prefix_length(&block[best_pos as usize..start], &block[start..]);
-        if best_len < MAX_COPY_LEN as u8 {
-            for &pos in posit {
-                let len = common_prefix_length(&block[best_pos as usize..start], &block[start..]);
-                if len > best_len {
-                    best_pos = pos;
-                    best_len = len;
-                    if len == MAX_COPY_LEN as u8 { break; }
-                }
+        let match_len = common_prefix_length(&block[best_pos as usize..start], &block[start..]);
+        let mut best_len = cmp::min(MAX_COPY_LEN as u8, match_len);
+        for &pos in posit {
+            let len = common_prefix_length(&block[pos as usize..start], &block[start..]);
+            if len > best_len {
+                best_pos = pos;
+                best_len = len;
+                if len == MAX_COPY_LEN as u8 { break; }
             }
         }
-        return Some((best_pos, best_len));
+        if best_len >= MIN_COPY_LEN as u8 {
+            Some((best_pos, best_len))
+        } else {
+            None
+        }
     }
 }
 
@@ -116,10 +164,10 @@ pub fn compress<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W) -> io::Result
 #[inline(never)]
 pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
                                                    options: &CompressorOptions) -> io::Result<()> {
-    assert!(inp.available() <= ::std::u32::MAX as u64);
-    let uncompressed_length = inp.available() as u32;
+    assert!(inp.available().unwrap() <= ::std::u32::MAX as u64);
+    let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
-    let mut dict = Dict::new(32);  // TODO Figure out capacity
+    let mut dict = Dict::new(options.block_size / 6);  // TODO Figure out capacity
     loop {
         let mut len;
         {
@@ -150,7 +198,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
         let mut copy_offset;
         let mut copy_len;
         loop {
-            match dict.find_best_match_or_add(block, i) {
+            match dict.find_best_match_or_add(block, i, options) {
                 None => {},
                 Some((pos, len)) => {
                     copy_offset = i as u32 - pos;
@@ -162,7 +210,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
             if i >= imax { break 'outer; }
         }
 
-        //println!("literal_start = {}, i = {}", literal_start, i);
+        //writeln!(io::stderr(), "literal_start = {}, i = {}", literal_start, i);
         try!(emit_literal(out, &block[literal_start..i]));
 
         loop {
@@ -170,7 +218,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
             try!(emit_copy(out, copy_offset, copy_len));
             literal_start = i;
             if i >= imax { break 'outer; }
-            match dict.find_best_match_or_add(block, i) {
+            match dict.find_best_match_or_add(block, i, options) {
                 None => break,
                 Some((pos, len)) => {
                     copy_offset = i as u32 - pos;
@@ -190,7 +238,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict, options:
 fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
     assert!(len > 0);
     assert!(len <= MAX_COPY_LEN as u8);
-    //println!("<copy len={} offset={}>", len, offset);
+    //writeln!(io::stderr(), "<copy len={} offset={}>", len, offset);
     if len <= 11 && offset <= 2047 {
         let n = len - 4;
         let tag = (n << 2) | COPY_1_BYTE | ((offset >> 3) & 0xE0) as u8;
@@ -209,7 +257,7 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
 
 fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
     assert!(literal.len() < ::std::u32::MAX as usize);
-    //println!("<literal len={}>", literal.len());
+    //writeln!(io::stderr(), "<literal len={}> \"{}\"", literal.len(), String::from_utf8_lossy(literal));
     let len = literal.len() - 1;
     if len < 60 {
         let tag = ((len as u8) << 2) | LITERAL;

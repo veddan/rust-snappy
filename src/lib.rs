@@ -1,3 +1,4 @@
+#![feature(std_misc)]
 mod decompress;
 mod compress;
 mod util;
