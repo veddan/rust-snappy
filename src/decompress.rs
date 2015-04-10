@@ -16,7 +16,7 @@ pub trait SnappyWrite : Write {
 
 #[derive(Debug)]
 pub enum SnappyError {
-    FormatError,
+    FormatError(&'static str),
     IoError(io::Error)
 }
 
@@ -49,8 +49,6 @@ macro_rules! read_new_buffer {
                 $on_eof
             },
             Ok(b) => {
-                //println!("[tag] read from reader: {:?} ({} bytes)",
-                            //&b[..cmp::min(11, b.len())], b.len());
                 (b.as_ptr(), b.as_ptr().offset(b.len() as isize))
             }
         }
@@ -70,7 +68,6 @@ impl <R: BufRead> Decompressor<R> {
 
     fn advance_tag(&mut self) -> Result<Option<usize>, SnappyError> {
         unsafe {
-            //println!("available: {}", self.available());
             let (buf, buf_end) = if self.available() == 0 {
                 self.reader.consume(self.read);
                 self.read = 0;
@@ -86,7 +83,8 @@ impl <R: BufRead> Decompressor<R> {
                 self.reader.consume(self.read);
                 self.read = 0;
                 while buf_len < tag_size {
-                    let (newbuf, newbuf_end) = read_new_buffer!(self, return Err(FormatError));
+                    let (newbuf, newbuf_end) = read_new_buffer!(self,
+                            return Err(FormatError("premature EOF while readig tag")));
                     let newbuf_len = newbuf_end as usize - newbuf as usize;
                     let to_read = cmp::min(tag_size - buf_len, newbuf_len);  // How many bytes should we read from the new buffer?
                     ptr::copy_nonoverlapping(newbuf, self.tmp.as_mut_ptr(), to_read);
@@ -112,7 +110,6 @@ impl <R: BufRead> Decompressor<R> {
     fn decompress<W: SnappyWrite>(&mut self, writer: &mut W) -> Result<(), SnappyError> {
         loop {
             let _tag_size = try_advance_tag!(self);
-            //println!("read {} byte tag", _tag_size);
             let c = self.read(1)[0];
             if c & 0x03 == 0 {  // literal
                 let lenbits = ((c & !0x03) >> 2) + 1;
@@ -123,7 +120,6 @@ impl <R: BufRead> Decompressor<R> {
                     let n = self.read_u32_le(literal_len_bytes) + 1;
                     n
                 };
-                //println!("<literal len={}>", literal_len);
                 let mut remaining = literal_len as usize;
                 while self.available() < remaining {
                     let available = self.available();
@@ -132,15 +128,13 @@ impl <R: BufRead> Decompressor<R> {
                         Err(e) => return Err(IoError(e))
                     };
                     remaining -= available;
-                    //println!("wrote {}, {} remaining", available, remaining);
                     self.reader.consume(self.read);
                     match self.reader.fill_buf() {
                         Err(e) => return Err(IoError(e)),
                         Ok(b) if b.len() == 0 => {
-                            return Err(FormatError);
+                            return Err(FormatError("premature EOF while reading literal"));
                         },
                         Ok(b) => {
-                            //println!("[literal] read from reader: {:?}", b);
                             self.buf = b.as_ptr();
                             self.buf_end = unsafe {  b.as_ptr().offset(b.len() as isize) };
                             self.read = b.len();
@@ -165,9 +159,8 @@ impl <R: BufRead> Decompressor<R> {
                     let offset = self.read_u32_le(4);
                     (len, offset)
                 };
-                //println!("<copy len={} offset={}>", copy_len, copy_offset);
                 if copy_offset == 0 {  // zero-length copies can't be encoded, no need to check
-                    return Err(FormatError);
+                    return Err(FormatError("zero-length offset"));
                 }
                 match writer.write_from_self(copy_offset as usize, copy_len as usize) {
                     Ok(_)  => {},
@@ -222,10 +215,10 @@ fn read_uncompressed_length<R: BufRead>(reader: &mut R) -> Result<u32, SnappyErr
     // This is a bit convoluted due to working around a borrowing issue with buf and reader.consume().
     match reader.fill_buf() {
         Err(e) => return Err(IoError(e)),
-        Ok(buf) if buf.len() == 0 => return Err(FormatError),
+        Ok(buf) if buf.len() == 0 => return Err(FormatError("premature EOF")),
         Ok(buf) => {
             for c in buf.iter() {
-                if shift >= 32 { return Err(FormatError); }
+                if shift >= 32 { return Err(FormatError("uncompressed length exceeds u32::MAX")); }
                 result |= ((c & 0x7F) as u32) << shift;
                 if (c & 0x80) == 0 {
                     success = true;
@@ -238,10 +231,9 @@ fn read_uncompressed_length<R: BufRead>(reader: &mut R) -> Result<u32, SnappyErr
     }
     if success {
         reader.consume(read);
-        //println!("uncompressed length: {}", result);
         Ok(result)
     } else {
-        Err(FormatError)
+        Err(FormatError("unterminated uncompressed length"))
     }
 }
 
