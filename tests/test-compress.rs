@@ -48,6 +48,11 @@ fn test_tiny_roundtrip() {
     test_roundtrip(&[1]);
 }
 
+#[test]
+fn test_empty_roundtrip() {
+    test_roundtrip(&[]);
+}
+
 fn test_roundtrip(inp: &[u8]) {
     let mut out = Vec::new();
     compress!(inp, &mut out);
