@@ -23,7 +23,7 @@ fn main() {
             },
             0b01 => 1,  // copy with 1-byte offset
             0b10 => 2,  // copy with 2-byte offset
-            0b11 => 4,  // copy with 2-byte offset
+            0b11 => 4,  // copy with 4-byte offset
             _    => unreachable!()
         };
         write!(&mut f, "\t{},\n", n).unwrap();
@@ -32,5 +32,5 @@ fn main() {
     }
     f.write_all(b"];\n\n").unwrap();
 
-    f.write_all(b"fn get_tag_size(c: u8) -> usize { TAG_SIZE[c as usize] as usize }\n").unwrap();
+    f.write_all(b"fn get_tag_size(c: u8) -> usize { (TAG_SIZE[c as usize] + 1) as usize }\n").unwrap();
 }

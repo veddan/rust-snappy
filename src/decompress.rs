@@ -84,8 +84,9 @@ impl <R: BufRead> Decompressor<R> {
                 buf_len = self.available();
             };
             let c = ptr::read(buf);
-            let tag_size = get_tag_size(c) + 1;
+            let tag_size = get_tag_size(c);
             if buf_len < tag_size {
+                writeln!(io::stderr(), "D: copying into scratch buffer, tag_size");
                 ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
@@ -94,13 +95,14 @@ impl <R: BufRead> Decompressor<R> {
                             return Err(FormatError("EOF while reading tag")));
                     let newbuf_len = newbuf_end as usize - newbuf as usize;
                     let to_read = cmp::min(tag_size - buf_len, newbuf_len);  // How many bytes should we read from the new buffer?
-                    ptr::copy_nonoverlapping(newbuf, self.tmp.as_mut_ptr(), to_read);
+                    ptr::copy(newbuf, self.tmp.as_mut_ptr().offset(buf_len as isize), to_read);
                     buf_len += to_read;
                     self.reader.consume(to_read);
                 }
                 self.buf = self.tmp.as_ptr();
-                self.buf_end = self.buf.offset(buf_len as isize);
+                self.buf_end = self.buf.offset(tag_size as isize);
             } else if buf_len < MAX_TAG_LEN {
+                writeln!(io::stderr(), "D: copying into scratch buffer, MAX_TAG_LEN");
                 ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
@@ -117,7 +119,7 @@ impl <R: BufRead> Decompressor<R> {
     fn decompress<W: SnappyWrite>(&mut self, writer: &mut W) -> Result<(), SnappyError> {
         loop {
             let tag_size = try_advance_tag!(self);
-            println!("tag_size = {}", tag_size);
+            //println!("tag_size = {}", tag_size);
             let c = self.read(1)[0];
             if c & 0x03 == 0 {  // literal
                 let literal_len = if tag_size == 1 {
@@ -126,8 +128,8 @@ impl <R: BufRead> Decompressor<R> {
                     let literal_len_bytes = (tag_size - 1) as u8;
                     self.read_u32_le(literal_len_bytes) + 1
                 };
-                println!("D: <literal len={}>", literal_len);
-                println!("D: buf: {:?} ({} bytes)", self.get_buf(), self.available());
+                writeln!(io::stderr(), "D: <literal len={}>", literal_len);
+                //println!("D: buf: {:?} ({} bytes)", self.get_buf(), self.available());
                 let mut remaining = literal_len as usize;
                 while self.available() < remaining {
                     let available = self.available();
@@ -137,16 +139,16 @@ impl <R: BufRead> Decompressor<R> {
                     };
                     remaining -= available;
                     self.reader.consume(self.read);
-                    println!("read: {}", self.read);
+                    //println!("read: {}", self.read);
                     match self.reader.fill_buf() {
                         Err(e) => return Err(IoError(e)),
                         Ok(b) if b.len() == 0 => {
-                            println!("empty buffer while reading literal, {} remaining", remaining);
+                            //println!("empty buffer while reading literal, {} remaining", remaining);
                             return Err(FormatError("EOF while reading literal"));
                         },
                         Ok(b) => {
                             self.buf = b.as_ptr();
-                            self.buf_end = unsafe {  b.as_ptr().offset(b.len() as isize) };
+                            self.buf_end = unsafe { b.as_ptr().offset(b.len() as isize) };
                             self.read = b.len();
                         }
                     }
@@ -169,7 +171,7 @@ impl <R: BufRead> Decompressor<R> {
                     let offset = self.read_u32_le(4);
                     (len, offset)
                 };
-                println!("D: <copy len={} offset={}>", copy_len, copy_offset);
+                writeln!(io::stderr(), "D: <copy len={} offset={}>", copy_len, copy_offset);
                 if copy_offset == 0 {  // zero-length copies can't be encoded, no need to check for them
                     return Err(FormatError("zero-length offset"));
                 }
@@ -185,6 +187,9 @@ impl <R: BufRead> Decompressor<R> {
         assert!(n as usize <= self.available());
         let r = unsafe { ::std::slice::from_raw_parts(self.buf, n) };
         self.advance(n);
+        if r.len() <= 5 {
+            writeln!(io::stderr(), "D: read: {:?}", r);
+        }
         return r;
     }
 
