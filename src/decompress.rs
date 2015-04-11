@@ -86,7 +86,7 @@ impl <R: BufRead> Decompressor<R> {
             let c = ptr::read(buf);
             let tag_size = get_tag_size(c);
             if buf_len < tag_size {
-                ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
+                ptr::copy(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
                 while buf_len < tag_size {
@@ -94,14 +94,14 @@ impl <R: BufRead> Decompressor<R> {
                             return Err(FormatError("EOF while reading tag")));
                     let newbuf_len = newbuf_end as usize - newbuf as usize;
                     let to_read = cmp::min(tag_size - buf_len, newbuf_len);  // How many bytes should we read from the new buffer?
-                    ptr::copy(newbuf, self.tmp.as_mut_ptr().offset(buf_len as isize), to_read);
+                    ptr::copy_nonoverlapping(newbuf, self.tmp.as_mut_ptr().offset(buf_len as isize), to_read);
                     buf_len += to_read;
                     self.reader.consume(to_read);
                 }
                 self.buf = self.tmp.as_ptr();
                 self.buf_end = self.buf.offset(tag_size as isize);
             } else if buf_len < MAX_TAG_LEN {
-                ptr::copy_nonoverlapping(buf, self.tmp.as_mut_ptr(), buf_len);
+                ptr::copy(buf, self.tmp.as_mut_ptr(), buf_len);
                 self.reader.consume(self.read);
                 self.read = 0;
                 self.buf = self.tmp.as_ptr();
