@@ -1,6 +1,7 @@
 extern crate snappy;
 
 use std::io::Cursor;
+use std::cmp;
 use snappy::{compress, decompress};
 
 static TEXT: &'static str = include_str!("moonstone-short.txt");
@@ -59,5 +60,7 @@ fn test_roundtrip(inp: &[u8]) {
     println!("compressed {} => {}", inp.len(), out.len());
     let mut roundtrip = Vec::new();
     decompress!(&out[..], &mut roundtrip);
-    assert_eq!(inp, &roundtrip[..])
+    let n = cmp::min(inp.len(), 384);
+    assert_eq!(&inp[..n], &roundtrip[..n]);  // Hopefully avoid some very long error messages
+    assert_eq!(inp, &roundtrip[..]);
 }

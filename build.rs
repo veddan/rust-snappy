@@ -32,5 +32,5 @@ fn main() {
     }
     f.write_all(b"];\n\n").unwrap();
 
-    f.write_all(b"fn get_tag_size(c: u8) -> usize { (TAG_SIZE[c as usize] + 1) as usize }\n").unwrap();
+    f.write_all(b"#[inline]\nfn get_tag_size(c: u8) -> usize { (TAG_SIZE[c as usize] + 1) as usize }\n").unwrap();
 }

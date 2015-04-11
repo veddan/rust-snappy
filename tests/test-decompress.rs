@@ -8,7 +8,12 @@ macro_rules! decompress(
         match decompress(&mut Cursor::new(&$input[..]), $output) {
             Err(e) => {
                 println!("failed: {:?}", e);
-                println!("remaining input: {:?}", &$input[..]);
+                let (ellipsis, len) = if $input.len() > 16 {
+                    ("...", 16)
+                } else {
+                    ("", $input.len())
+                };
+                println!("remaining input: {:?}{}", &$input[..len], ellipsis);
                 panic!("failed: {:?}", e)
             },
             Ok(_)  => {}
@@ -88,15 +93,13 @@ fn test_repeat_copy() {
 }
 
 #[test]
-fn test_vec_write_from_self() {
-    let mut xs = vec![1, 2, 3, 4];
-    xs.write_from_self(3, 2).unwrap();
-    assert_eq!(&xs[..], &[1, 2, 3, 4, 2, 3]);
-}
-
-#[test]
-fn test_vec_write_from_self_long() {
-    let mut xs = vec![1, 2, 3];
-    xs.write_from_self(2, 4).unwrap();
-    assert_eq!(&xs[..], &[1, 2, 3, 2, 3, 2, 3]);
+fn test_decompress_malformed() {
+    let n = 114045;
+    let mut input = vec![250, 134, 252, 255, 255, 0, 0, 84, 104, 101, 32];
+    input.reserve(n);
+    while input.len() < n {
+        input.push(0);
+    }
+    let mut out = Vec::new();
+    let _ = decompress(&mut Cursor::new(&input[..]), &mut out);
 }

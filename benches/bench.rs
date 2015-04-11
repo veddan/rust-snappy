@@ -39,16 +39,32 @@ macro_rules! compress(
 
 #[bench]
 fn bench_compress_text(bench: &mut test::Bencher) {
-    bench.iter(|| {
-        let mut out = Vec::with_capacity(TEXT.len());
-        compress!(TEXT.as_bytes(), &mut out);
-    });
-    bench.bytes = TEXT.len() as u64;
+    do_bench_compression(TEXT.as_bytes(), bench);
 }
 
 #[bench]
 fn bench_compress_short_text(bench: &mut test::Bencher) {
-    let input = &TEXT.as_bytes()[727..2000];
+    do_bench_compression(&TEXT.as_bytes()[727..2000], bench);
+}
+
+#[bench]
+fn bench_compress_random(bench: &mut test::Bencher) {
+    let mut rng = weak_rng();
+    let input: Vec<u8> = (0..TEXT.len()).map(|_| rng.gen()).collect();
+    do_bench_compression(&input[..], bench);
+}
+
+#[bench]
+fn bench_decompress_text(bench: &mut test::Bencher) {
+    do_bench_decompression(TEXT.as_bytes(), bench);
+}
+
+#[bench]
+fn bench_decompress_short_text(bench: &mut test::Bencher) {
+    do_bench_decompression(&TEXT.as_bytes()[727..2000], bench);
+}
+
+fn do_bench_compression(input: &[u8], bench: &mut test::Bencher) {
     bench.iter(|| {
         let mut out = Vec::with_capacity(input.len());
         compress!(input, &mut out);
@@ -56,24 +72,12 @@ fn bench_compress_short_text(bench: &mut test::Bencher) {
     bench.bytes = input.len() as u64;
 }
 
-#[bench]
-fn bench_compress_random(bench: &mut test::Bencher) {
-    let mut rng = weak_rng();
-    let input: Vec<u8> = (0..TEXT.len()).map(|_| rng.gen()).collect();
+fn do_bench_decompression(input: &[u8], bench: &mut test::Bencher) {
+    let mut compressed = Vec::new();
+    compress!(input, &mut compressed);
     bench.iter(|| {
         let mut out = Vec::with_capacity(input.len());
-        compress!(&input[..], &mut out);
-    });
-    bench.bytes = input.len() as u64;
-}
-
-#[bench]
-fn bench_decompress_text(bench: &mut test::Bencher) {
-    let mut compressed = Vec::new();
-    compress!(TEXT.as_bytes(), &mut compressed);
-    bench.iter(|| {
-        let mut out = Vec::with_capacity(TEXT.len());
         decompress!(compressed[..], &mut out);
     });
-    bench.bytes = TEXT.len() as u64;
+    bench.bytes = input.len() as u64;
 }
