@@ -47,6 +47,16 @@ fn bench_compress_text(bench: &mut test::Bencher) {
 }
 
 #[bench]
+fn bench_compress_short_text(bench: &mut test::Bencher) {
+    let input = &TEXT.as_bytes()[727..2000];
+    bench.iter(|| {
+        let mut out = Vec::with_capacity(input.len());
+        compress!(input, &mut out);
+    });
+    bench.bytes = input.len() as u64;
+}
+
+#[bench]
 fn bench_compress_random(bench: &mut test::Bencher) {
     let mut rng = weak_rng();
     let input: Vec<u8> = (0..TEXT.len()).map(|_| rng.gen()).collect();

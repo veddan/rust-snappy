@@ -212,7 +212,8 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     debug_assert!(inp.available().unwrap() <= ::std::u32::MAX as u64);
     let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
-    let mut dict = Dict::new(options.block_size / 7);  // TODO Figure out capacity
+    let max_block_len = cmp::min(options.block_size, uncompressed_length);
+    let mut dict = Dict::new(max_block_len / 8);  // TODO Figure out capacity
     let mut written = 0;
     loop {
         let mut len;
