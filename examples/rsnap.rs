@@ -7,7 +7,8 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::fs::File;
 use std::default::Default;
-use snappy::{decompress, compress_with_options, CompressorOptions};
+use std::process::exit;
+use snappy::{decompress, compress_with_options, CompressorOptions, MAX_BLOCK_SIZE};
 use docopt::Docopt;
 
 static USAGE: &'static str = "
@@ -26,7 +27,7 @@ Options:
 struct Args {
     arg_src: String,
     flag_decompress: bool,
-    flag_block_size: Option<u32>
+    flag_block_size: Option<usize>
 }
 
 fn main() {
@@ -41,7 +42,18 @@ fn main() {
     } else {
         let mut output = BufWriter::new(io::stdout());
         let mut options = CompressorOptions::default();
-        args.flag_block_size.map(|m| options.block_size = m * 1024);
+        args.flag_block_size.map(|m|{
+            let bytes = match m.checked_mul(1024).and_then(|x| {
+                    if x > ::std::u16::MAX as usize { None } else { Some(x as u16) } }) {
+                Some(b) => b,
+                None    => {
+                    writeln!(io::stderr(), "Chosen block size {}kb is greater than the maximum {}kb",
+                             m, MAX_BLOCK_SIZE / 1024).unwrap();
+                    exit(1);
+                }
+            };
+            options.block_size = bytes;
+        });
         compress_with_options(&mut input, &mut output, &options).unwrap();
     }
 }

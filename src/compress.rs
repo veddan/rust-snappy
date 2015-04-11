@@ -11,14 +11,16 @@ use util;
 const LITERAL: u8 = 0;
 const COPY_1_BYTE: u8 = 1;
 const COPY_2_BYTE: u8 = 2;
-const COPY_4_BYTE: u8 = 3;
 
-const MIN_COPY_LEN: u32 = 4;
-const MAX_COPY_LEN: u32 = 64;
+const MIN_COPY_LEN: u16 = 4;
+const MAX_COPY_LEN: u16 = 64;
 
 const BLOCK_MARGIN: usize = 16;
 
+pub const MAX_BLOCK_SIZE: usize = ::std::u16::MAX as usize;
+
 /// Maximum number of positions stored for one prefix. Must not be 0.
+/// Larger values leads to better compression, but worsens compression speed and memory usage.
 const MAX_CHAIN_LEN: u8 = 3;
 
 pub trait SnappyRead : BufRead {
@@ -49,7 +51,7 @@ impl SnappyRead for BufReader<File> {
 /// When a new element is added, the oldest is removed.
 #[derive(Copy, Clone)]
 struct PositionQueue {
-    queue: [u32; MAX_CHAIN_LEN as usize],
+    queue: [u16; MAX_CHAIN_LEN as usize],
     len: u8
 }
 
@@ -61,11 +63,11 @@ impl PositionQueue {
         }
     }
 
-    fn iter<'a>(&'a self) -> Iter<'a, u32> {
+    fn iter<'a>(&'a self) -> Iter<'a, u16> {
         self.queue[..self.len()].iter()
     }
 
-    fn push(&mut self, pos: u32) {
+    fn push(&mut self, pos: u16) {
         if self.len > 0 && MAX_CHAIN_LEN > 1 {
             if MAX_CHAIN_LEN == 2 {
                 self.queue[1] = self.queue[0];
@@ -96,13 +98,13 @@ impl PositionQueue {
 }
 
 pub struct CompressorOptions {
-    pub block_size: u32,
+    pub block_size: u16,
 }
 
 impl Default for CompressorOptions {
     fn default() -> CompressorOptions {
         CompressorOptions {
-            block_size: 65536,
+            block_size: MAX_BLOCK_SIZE as u16,
         }
     }
 }
@@ -122,7 +124,7 @@ impl LossyHashTable {
         }
     }
 
-    fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u32) -> Option<&'a mut PositionQueue> {
+    fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u16) -> Option<&'a mut PositionQueue> {
         debug_assert_eq!(key.len(), MIN_COPY_LEN as usize);
         let key = unsafe { ptr::read(key.as_ptr() as *const u32) };
         let idx = self.hash(key);
@@ -172,9 +174,10 @@ impl Dict {
         self.table.clear();
     }
 
-    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u32)> {
+    /// Returns (position, length)
+    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u16, u16)> {
         let prefix = &block[start..start + MIN_COPY_LEN as usize];
-        let positions = match self.table.get_or_insert(prefix, start as u32) {
+        let positions = match self.table.get_or_insert(prefix, start as u16) {
             None     => return None,
             Some(ps) => ps
         };
@@ -185,7 +188,7 @@ impl Dict {
             let mut posit = positions.iter();
             best_pos = *posit.next().unwrap();
             // We already know the first MIN_COPY_LEN bytes are equal, no need to search through them.
-            let search_start = start as u32 + MIN_COPY_LEN;
+            let search_start = start as u16 + MIN_COPY_LEN;
             best_len = MIN_COPY_LEN + common_prefix_length(block, best_pos + MIN_COPY_LEN, search_start);
             for &pos in posit {
                 let len = MIN_COPY_LEN + common_prefix_length(block, pos + MIN_COPY_LEN, search_start);
@@ -195,7 +198,7 @@ impl Dict {
                 }
             }
         }
-        positions.push(start as u32);
+        positions.push(start as u16);
         Some((best_pos, best_len))
     }
 }
@@ -212,7 +215,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     debug_assert!(inp.available().unwrap() <= ::std::u32::MAX as u64);
     let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
-    let max_block_len = cmp::min(options.block_size, uncompressed_length);
+    let max_block_len = cmp::min(options.block_size as u32, uncompressed_length);
     let mut dict = Dict::new(max_block_len / 8);  // TODO Figure out capacity
     let mut written = 0;
     loop {
@@ -251,7 +254,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
             match dict.find_best_match_or_add(block, i) {
                 None => {},
                 Some((pos, len)) => {
-                    copy_offset = i as u32 - pos;
+                    copy_offset = i as u16 - pos;
                     copy_len = len;
                     break;
                 }
@@ -270,7 +273,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
             match dict.find_best_match_or_add(block, i) {
                 None => break,
                 Some((pos, len)) => {
-                    copy_offset = i as u32 - pos;
+                    copy_offset = i as u16 - pos;
                     copy_len = len;
                 }
             }
@@ -285,7 +288,7 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
 }
 
 /// Emits a copy of any size, possibly emitting multiple copy tags.
-fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> {
+fn emit_copy<W: Write>(out: &mut W, offset: u16, len: u16) -> io::Result<()> {
     debug_assert!(len >= MIN_COPY_LEN);
     //writeln!(io::stderr(), "<copy len={} offset={}>", len, offset);
     let mut remaining = len;
@@ -302,7 +305,7 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> {
     do_emit_copy(out, offset, remaining)
 }
 
-fn do_emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> {
+fn do_emit_copy<W: Write>(out: &mut W, offset: u16, len: u16) -> io::Result<()> {
     debug_assert!(len >= MIN_COPY_LEN);
     debug_assert!(len <= MAX_COPY_LEN);
     let len = len as u8;
@@ -311,16 +314,11 @@ fn do_emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> 
         let tag = (n << 2) | COPY_1_BYTE | ((offset >> 3) & 0xE0) as u8;
         let low_len = (offset & 0xFF) as u8;
         try!(out.write(&[tag, low_len]));
-    } else if offset <= 65535 {
+    } else {
         let n = len - 1;
         let tag = (n << 2) | COPY_2_BYTE;
         try!(out.write(&[tag]));
         try!(write_u16_le(out, offset as u16));
-    } else {
-        let n = len - 1;
-        let tag = (n << 2) | COPY_4_BYTE;
-        try!(out.write(&[tag]));
-        try!(write_u32_le(out, offset as u32));
     }
     Ok(())
 }
@@ -335,7 +333,7 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
         try!(out.write_all(literal));
     } else {
         let mut ds = [0, 0, 0, 0];
-        let mut n = len;
+        let mut n = native_to_le32(len as u32);
         let mut count = 0;
         while n > 0 {
             ds[count + 1] = (n & 0xFF) as u8;
@@ -351,13 +349,13 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
 }
 
 /// Find the length of the common prefix of slices in block starting at a and b.
-fn common_prefix_length(block: &[u8], a: u32, b: u32) -> u32 {
+fn common_prefix_length(block: &[u8], a: u16, b: u16) -> u16 {
     let s1 = block[a as usize..].as_ptr();
     let s2 = block[b as usize..].as_ptr();
     unsafe {
         // TODO The cast to isize "can" (not really due to block size limitations) overflow
         let s2_limit = block.as_ptr().offset(block.len() as isize);
-        find_match_length(s1, s2, s2_limit)
+        find_match_length(s1, s2, s2_limit) as u16
     }
 }
 
@@ -412,15 +410,6 @@ unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u
         }
     }
     return matched;
-}
-
-
-fn write_u32_le<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
-    let le = native_to_le32(n);
-    let ptr = &le as *const u32 as *const u8;
-    let s = unsafe { ::std::slice::from_raw_parts(ptr, 4) };
-    try!(out.write(s));
-    Ok(())
 }
 
 fn write_u16_le<W: Write>(out: &mut W, n: u16) -> io::Result<()> {
@@ -513,8 +502,8 @@ mod test {
     #[test]
     fn test_emit_copy_large() {
         let mut out = Vec::new();
-        emit_copy(&mut out, 120_000, 40).unwrap();
-        assert_eq!(&out[..], &[0b100111_11, 0xC0, 0xD4, 0x01, 0x00]);
+        emit_copy(&mut out, 60_000, 40).unwrap();
+        assert_eq!(&out[..], &[0b100111_10, 0x60, 0xEA]);
     }
 
     #[test]
