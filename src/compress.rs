@@ -46,7 +46,7 @@ impl SnappyRead for BufReader<File> {
 
 /// Small, fixed-size, non-allocating queue of positions of prefixes in the Dict.
 /// When a new element is added, the oldest is removed.
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct PositionQueue {
     queue: [u32; MAX_CHAIN_LEN as usize],
     len: u8
@@ -144,6 +144,8 @@ impl LossyHashTable {
         }
     }
 
+    // Used for hashing prefixes.
+    // A good hash function means better compression, since there will be fewer collisions.
     fn hash(&self, key: u32) -> usize {
         let mut a = (key ^ 61) ^ (key >> 16);
         a = a.wrapping_add(a << 3);
@@ -212,6 +214,7 @@ pub fn compress<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W) -> io::Result
     compress_with_options(inp, out, &Default::default())
 }
 
+// TODO Report an error on readers with too much available()
 #[inline(never)]
 pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
                                                    options: &CompressorOptions) -> io::Result<()> {
@@ -219,6 +222,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
     let mut dict = Dict::new(options.block_size / 7);  // TODO Figure out capacity
+    let mut written = 0;
     loop {
         let mut len;
         {
@@ -230,7 +234,10 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
             len = buf.len();
             for chunk in buf.chunks(options.block_size as usize) {
                 try!(compress_block(chunk, out, &mut dict));
-                dict.clear();
+                written += chunk.len() as u32;
+                if written < uncompressed_length {
+                    dict.clear();
+                }
             }
         }
         inp.consume(len);
@@ -336,9 +343,9 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
 /// Assumes that the common prefix is at least MIN_COPY_LEN.
 fn common_prefix_length(a: &[u8], b: &[u8]) -> u8 {
     debug_assert_eq!(&a[..MIN_COPY_LEN], &b[..MIN_COPY_LEN]);
-    let n = cmp::min(a.len(), b.len());
+    let n = cmp::min(cmp::min(a.len(), b.len()), MAX_COPY_LEN);
     let mut i = MIN_COPY_LEN;
-    while i < n && a[i] == b[i] && i < MAX_COPY_LEN { i += 1; }
+    while i < n && a[i] == b[i] { i += 1; }
     return i as u8;
 }
 
@@ -346,14 +353,16 @@ fn write_u32_le<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
     let le = native_to_le32(n);
     let ptr = &le as *const u32 as *const u8;
     let s = unsafe { ::std::slice::from_raw_parts(ptr, 4) };
-    out.write_all(s)
+    try!(out.write(s));
+    Ok(())
 }
 
 fn write_u16_le<W: Write>(out: &mut W, n: u16) -> io::Result<()> {
     let le = native_to_le16(n);
     let ptr = &le as *const u16 as *const u8;
     let s = unsafe { ::std::slice::from_raw_parts(ptr, 2) };
-    out.write_all(s)
+    try!(out.write(s));
+    Ok(())
 }
 
 fn write_varint<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
