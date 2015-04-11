@@ -5,15 +5,16 @@ use std::cmp;
 use std::ptr;
 use std::slice::Iter;
 use std::fs::File;
-use util::{native_to_le16, native_to_le32};
+use util::{native_to_le16, native_to_le32, next_power_of_2};
+use util;
 
 const LITERAL: u8 = 0;
 const COPY_1_BYTE: u8 = 1;
 const COPY_2_BYTE: u8 = 2;
 const COPY_4_BYTE: u8 = 3;
 
-const MIN_COPY_LEN: usize = 4;
-const MAX_COPY_LEN: usize = 64;
+const MIN_COPY_LEN: u32 = 4;
+const MAX_COPY_LEN: u32 = 64;
 
 const BLOCK_MARGIN: usize = 16;
 
@@ -122,7 +123,7 @@ impl LossyHashTable {
     }
 
     fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u32) -> Option<&'a mut PositionQueue> {
-        debug_assert_eq!(key.len(), MIN_COPY_LEN);
+        debug_assert_eq!(key.len(), MIN_COPY_LEN as usize);
         let key = unsafe { ptr::read(key.as_ptr() as *const u32) };
         let idx = self.hash(key);
         // We know idx is always in range, but using safe indexing is for some reason faster.
@@ -156,16 +157,6 @@ impl LossyHashTable {
     }
 }
 
-fn next_power_of_2(n: u32) -> u32 {
-    let mut v = n.wrapping_sub(1);
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v.wrapping_add(1)
-}
-
 struct Dict {
     table: LossyHashTable
 }
@@ -181,8 +172,8 @@ impl Dict {
         self.table.clear();
     }
 
-    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u8)> {
-        let prefix = &block[start..start + MIN_COPY_LEN];
+    fn find_best_match_or_add(&mut self, block: &[u8], start: usize) -> Option<(u32, u32)> {
+        let prefix = &block[start..start + MIN_COPY_LEN as usize];
         let positions = match self.table.get_or_insert(prefix, start as u32) {
             None     => return None,
             Some(ps) => ps
@@ -190,14 +181,14 @@ impl Dict {
 
         let mut best_pos;
         let mut best_len;
-        let tail = &block[start..];
         {
             let mut posit = positions.iter();
             best_pos = *posit.next().unwrap();
-            best_len = common_prefix_length(&block[best_pos as usize..], tail);
+            // We already know the first MIN_COPY_LEN bytes are equal, no need to search through them.
+            let search_start = start as u32 + MIN_COPY_LEN;
+            best_len = MIN_COPY_LEN + common_prefix_length(block, best_pos + MIN_COPY_LEN, search_start);
             for &pos in posit {
-                if best_len == MAX_COPY_LEN as u8 { break; }
-                let len = common_prefix_length(&block[pos as usize..], tail);
+                let len = MIN_COPY_LEN + common_prefix_length(block, pos + MIN_COPY_LEN, search_start);
                 if len > best_len {
                     best_pos = pos;
                     best_len = len;
@@ -292,9 +283,28 @@ fn compress_block<W: Write>(block: &[u8], out: &mut W, dict: &mut Dict)
     }
 }
 
-fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
-    debug_assert!(len > 0);
-    debug_assert!(len <= MAX_COPY_LEN as u8);
+/// Emits a copy of any size, possibly emitting multiple copy tags.
+fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> {
+    debug_assert!(len >= MIN_COPY_LEN);
+    //writeln!(io::stderr(), "<copy len={} offset={}>", len, offset);
+    let mut remaining = len;
+    while remaining >= MAX_COPY_LEN + MIN_COPY_LEN {
+        try!(do_emit_copy(out, offset, MAX_COPY_LEN));
+        remaining -= MAX_COPY_LEN;
+    }
+    if remaining > MAX_COPY_LEN {
+        let to_emit = MAX_COPY_LEN - MIN_COPY_LEN;
+        try!(do_emit_copy(out, offset, to_emit));
+        remaining -= to_emit;
+    }
+    // We've made sure not to emit the last MIN_COPY_LEN, so we don't need a check here.
+    do_emit_copy(out, offset, remaining)
+}
+
+fn do_emit_copy<W: Write>(out: &mut W, offset: u32, len: u32) -> io::Result<()> {
+    debug_assert!(len >= MIN_COPY_LEN);
+    debug_assert!(len <= MAX_COPY_LEN);
+    let len = len as u8;
     if len <= 11 && offset <= 2047 {
         let n = len - 4;
         let tag = (n << 2) | COPY_1_BYTE | ((offset >> 3) & 0xE0) as u8;
@@ -316,6 +326,7 @@ fn emit_copy<W: Write>(out: &mut W, offset: u32, len: u8) -> io::Result<()> {
 
 fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
     debug_assert!(literal.len() < ::std::u32::MAX as usize);
+    //writeln!(io::stderr(), "<literal len={}>", literal.len());
     let len = literal.len() - 1;
     if len < 60 {
         let tag = ((len as u8) << 2) | LITERAL;
@@ -338,16 +349,70 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Find the length of the common prefix of a and b.
-/// Will not return more than MAX_COPY_LEN.
-/// Assumes that the common prefix is at least MIN_COPY_LEN.
-fn common_prefix_length(a: &[u8], b: &[u8]) -> u8 {
-    debug_assert_eq!(&a[..MIN_COPY_LEN], &b[..MIN_COPY_LEN]);
-    let n = cmp::min(cmp::min(a.len(), b.len()), MAX_COPY_LEN);
-    let mut i = MIN_COPY_LEN;
-    while i < n && a[i] == b[i] { i += 1; }
-    return i as u8;
+/// Find the length of the common prefix of slices in block starting at a and b.
+fn common_prefix_length(block: &[u8], a: u32, b: u32) -> u32 {
+    let s1 = block[a as usize..].as_ptr();
+    let s2 = block[b as usize..].as_ptr();
+    unsafe {
+        // TODO The cast to isize "can" (not really due to block size limitations) overflow
+        let s2_limit = block.as_ptr().offset(block.len() as isize);
+        find_match_length(s1, s2, s2_limit)
+    }
 }
+
+// Largely borrowed from the reference Snappy implementation
+// Does not read *s2_limit or beyond.
+// Does not read *(s1 + (s2_limit - s2)) or beyond.
+// Requires that s2_limit >= s2.
+#[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u8) -> u32 {
+    unsafe fn load64(p: *const u8) -> u64 { ptr::read(p as *const u64) }
+
+    let mut matched = 0;
+    while s2 <= s2_limit.offset(-8) {
+        if load64(s2) == load64(s1.offset(matched as isize)) {
+            s2 = s2.offset(8);
+            matched += 8;
+        } else {
+            let x = load64(s2) ^ load64(s1.offset(matched as isize));
+            let matching_bits = util::find_lsb_set64(x);
+            matched += matching_bits / 8;
+            return matched;
+        }
+    }
+    while s2 < s2_limit {
+        if *s1.offset(matched as isize) == *s2 {
+            s2 = s2.offset(1);
+            matched += 1;
+        } else {
+            return matched;
+        }
+    }
+    return matched;
+}
+
+#[cfg(not(all(target_pointer_width = "64", target_endian = "little")))]
+unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u8) -> u32 {
+    unsafe fn load_32(p: *const u8) -> u32 { ptr::read(p as *const u32) }
+
+    let mut matched = 0;
+    while s2 <= s2_limit.offset(-4) && load32(s2) == load32(s1.offset(matched as isize)) {
+        s2 = s2.offset(4);
+        matched += 4;
+    }
+    if cfg!(target_endian = "little") {
+        let x = load32(s2) ^ load32(s1.offset(matched as isize));
+        let matching_bits = util::find_lsb_set32(x);
+        matched += matching_bits / 8;
+    } else {
+        while s2 < s2_limit && *s1.offset(matched as isize) == *s2 {
+            s2 = s2.offset(1);
+            matched += 1;
+        }
+    }
+    return matched;
+}
+
 
 fn write_u32_le<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
     let le = native_to_le32(n);
@@ -400,7 +465,7 @@ fn write_varint<W: Write>(out: &mut W, n: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use super::{write_varint, emit_literal, emit_copy};
+    use super::{write_varint, emit_literal, emit_copy, common_prefix_length};
 
     #[test]
     fn test_write_varint_short() {
@@ -449,5 +514,14 @@ mod test {
         let mut out = Vec::new();
         emit_copy(&mut out, 120_000, 40).unwrap();
         assert_eq!(&out[..], &[0b100111_11, 0xC0, 0xD4, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn test_common_prefix_length() {
+        assert_eq!(common_prefix_length(&[1, 2, 3, 4, 5, 3, 4, 5], 2, 5), 3);
+        assert_eq!(common_prefix_length(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                                                3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 2, 11), 9);
+        assert_eq!(common_prefix_length(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                                                3, 4, 5, 6, 0, 8, 9, 10, 11, 12], 2, 11), 4);
     }
 }
