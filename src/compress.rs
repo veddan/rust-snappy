@@ -81,8 +81,9 @@ impl PositionQueue {
                 self.queue[2] = self.queue[1];
                 self.queue[1] = self.queue[0];
             } else {
+                let len = cmp::min(self.len + 1, MAX_CHAIN_LEN) as usize;
                 unsafe {
-                    ptr::copy(self.queue.as_ptr(), self.queue.as_mut_ptr().offset(1), self.len())
+                    ptr::copy(self.queue.as_ptr(), self.queue.as_mut_ptr().offset(1), len - 1)
                 }
             }
         }
@@ -106,39 +107,36 @@ impl Default for CompressorOptions {
 }
 
 struct LossyHashTable {
-    table: Vec<([u8; MIN_COPY_LEN], PositionQueue)>
+    table: Vec<(u32, PositionQueue)>,
+    /// Mask that performs the function of the usual module in hash tables
+    range_mask: u32
 }
 
 impl LossyHashTable {
     fn new(capacity: u32) -> LossyHashTable {
+        let real_capacity = cmp::max(16, next_power_of_2(capacity));
         LossyHashTable {
-            table:vec![([0, 0, 0, 0], PositionQueue::new()); capacity as usize]
+            table: vec![(0, PositionQueue::new()); real_capacity as usize],
+            range_mask: real_capacity - 1
         }
     }
 
     fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u32) -> Option<&'a mut PositionQueue> {
         debug_assert_eq!(key.len(), MIN_COPY_LEN);
+        let key = unsafe { ptr::read(key.as_ptr() as *const u32) };
         let idx = self.hash(key);
+        // We know idx is always in range, but using safe indexing is for some reason faster.
         let &mut (ref mut stored_key, ref mut queue) = &mut self.table[idx];
-        if queue.len() != 0 && LossyHashTable::key_eq(stored_key, key) {
+        if queue.len() != 0 && *stored_key == key {
             return Some(queue);
         } else {
-            stored_key[0] = key[0];
-            stored_key[1] = key[1];
-            stored_key[2] = key[2];
-            stored_key[3] = key[3];
+            *stored_key = key;
             queue.len = 0;
             queue.push(pos);
             return None;
         }
     }
 
-    fn key_eq(stored_key: &[u8; MIN_COPY_LEN], key: &[u8]) -> bool {
-        stored_key[0] == key[0] &&
-        stored_key[1] == key[1] &&
-        stored_key[2] == key[2] &&
-        stored_key[3] == key[3]
-    }
 
     fn clear(&mut self) {
         for e in self.table.iter_mut() {
@@ -146,23 +144,24 @@ impl LossyHashTable {
         }
     }
 
-    // Rovert Sedgewick's string hashing algorithm
-    fn hash(&self, bytes: &[u8]) -> usize {
-        let mut hash = 0u32;
-        let mut a = 63689u32;
-        let b = 378551u32;
-        hash = hash.wrapping_add(bytes[0] as u32);
-        a = a.wrapping_mul(b);
-        hash = hash.wrapping_mul(a);
-        hash = hash.wrapping_add(bytes[1] as u32);
-        a = a.wrapping_mul(b);
-        hash = hash.wrapping_mul(a);
-        hash = hash.wrapping_add(bytes[2] as u32);
-        a = a.wrapping_mul(b);
-        hash = hash.wrapping_mul(a);
-        hash = hash.wrapping_add(bytes[3] as u32);
-        (hash % self.table.len() as u32) as usize
+    fn hash(&self, key: u32) -> usize {
+        let mut a = (key ^ 61) ^ (key >> 16);
+        a = a.wrapping_add(a << 3);
+        a = a ^ (a >> 4);
+        a = a.wrapping_mul(0x27d4eb2d);
+        a = a ^ (a >> 15);
+        (a & self.range_mask) as usize
     }
+}
+
+fn next_power_of_2(n: u32) -> u32 {
+    let mut v = n.wrapping_sub(1);
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v.wrapping_add(1)
 }
 
 struct Dict {
