@@ -2,8 +2,9 @@ use std::io::{Write, BufRead};
 use std::io;
 use std::ptr;
 use std::cmp;
+use std::u16;
+use std::u32;
 use std::result::Result;
-use util::{native_to_le16, native_to_le32};
 use self::SnappyError::*;
 
 include!(concat!(env!("OUT_DIR"), "/tables.rs"));
@@ -200,13 +201,13 @@ impl <R: BufRead> Decompressor<R> {
         const MASKS: &'static [u32] = &[0, 0x000000FF, 0x0000FFFF, 0x00FFFFFF, 0xFFFFFFFF];
         let p = self.buf as *const u32;
         self.advance(bytes as usize);
-        native_to_le32(unsafe { ptr::read(p) }) & MASKS[bytes as usize]
+        u32::from_le(unsafe { ptr::read(p) }) & MASKS[bytes as usize]
     }
 
     fn read_u16_le(&mut self) -> u16 {
         let p = self.read(2).as_ptr() as *const u16;
         let x = unsafe { ptr::read(p) };
-        return native_to_le16(x);
+        return u16::from_le(x);
     }
 }
 

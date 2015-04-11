@@ -5,8 +5,7 @@ use std::cmp;
 use std::ptr;
 use std::slice::Iter;
 use std::fs::File;
-use util::{native_to_le16, native_to_le32, next_power_of_2};
-use util;
+use util::next_power_of_2;
 
 const LITERAL: u8 = 0;
 const COPY_1_BYTE: u8 = 1;
@@ -333,7 +332,7 @@ fn emit_literal<W: Write>(out: &mut W, literal: &[u8]) -> io::Result<()> {
         try!(out.write_all(literal));
     } else {
         let mut ds = [0, 0, 0, 0];
-        let mut n = native_to_le32(len as u32);
+        let mut n = (len as u32).to_le();
         let mut count = 0;
         while n > 0 {
             ds[count + 1] = (n & 0xFF) as u8;
@@ -374,7 +373,7 @@ unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u
             matched += 8;
         } else {
             let x = load64(s2) ^ load64(s1.offset(matched as isize));
-            let matching_bits = util::find_lsb_set64(x);
+            let matching_bits = x.trailing_zeros();
             matched += matching_bits / 8;
             return matched;
         }
@@ -401,7 +400,7 @@ unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u
     }
     if cfg!(target_endian = "little") {
         let x = load32(s2) ^ load32(s1.offset(matched as isize));
-        let matching_bits = util::find_lsb_set32(x);
+        let matching_bits = x.trailing_zeros();
         matched += matching_bits / 8;
     } else {
         while s2 < s2_limit && *s1.offset(matched as isize) == *s2 {
@@ -413,7 +412,7 @@ unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u
 }
 
 fn write_u16_le<W: Write>(out: &mut W, n: u16) -> io::Result<()> {
-    let le = native_to_le16(n);
+    let le = n.to_le();
     let ptr = &le as *const u16 as *const u8;
     let s = unsafe { ::std::slice::from_raw_parts(ptr, 2) };
     try!(out.write(s));
