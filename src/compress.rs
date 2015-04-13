@@ -6,6 +6,7 @@ use std::ptr;
 use std::slice::Iter;
 use std::fs::File;
 use util::next_power_of_2;
+use zero_array::ZeroArray;
 
 const LITERAL: u8 = 0;
 const COPY_1_BYTE: u8 = 1;
@@ -21,6 +22,10 @@ pub const MAX_BLOCK_SIZE: usize = ::std::u16::MAX as usize;
 /// Maximum number of positions stored for one prefix. Must not be 0.
 /// Larger values leads to better compression, but worsens compression speed and memory usage.
 const MAX_CHAIN_LEN: u8 = 3;
+
+const MAX_HASHTABLE_BITS: u32 = 14;
+
+const MAX_HASHTABLE_SIZE: u32 = 1 << MAX_HASHTABLE_BITS;
 
 pub trait SnappyRead : BufRead {
     /// Returns the total number of bytes left to be read.
@@ -109,22 +114,22 @@ impl Default for CompressorOptions {
 }
 
 struct LossyHashTable {
-    table: Vec<(u32, PositionQueue)>,
-    /// Mask that performs the function of the usual module in hash tables
-    range_mask: u32
+    table: ZeroArray<(u32, PositionQueue)>,
+    range_shift: u32
 }
 
 impl LossyHashTable {
     fn new(capacity: u32) -> LossyHashTable {
-        let real_capacity = cmp::max(16, next_power_of_2(capacity));
+        let real_capacity = cmp::min(MAX_HASHTABLE_SIZE, cmp::max(16, next_power_of_2(capacity)));
         LossyHashTable {
-            table: vec![(0, PositionQueue::new()); real_capacity as usize],
-            range_mask: real_capacity - 1
+            table: unsafe { ZeroArray::new(real_capacity) },
+            range_shift: 32 - real_capacity.trailing_zeros()
         }
     }
 
     fn get_or_insert<'a>(&'a mut self, key: &[u8], pos: u16) -> Option<&'a mut PositionQueue> {
         debug_assert_eq!(key.len(), MIN_COPY_LEN as usize);
+        // TODO: What if key.len() < 4 ? (It's not, but still)
         let key = unsafe { ptr::read(key.as_ptr() as *const u32) };
         let idx = self.hash(key);
         // We know idx is always in range, but using safe indexing is for some reason faster.
@@ -149,12 +154,7 @@ impl LossyHashTable {
     // Used for hashing prefixes.
     // A good hash function means better compression, since there will be fewer collisions.
     fn hash(&self, key: u32) -> usize {
-        let mut a = (key ^ 61) ^ (key >> 16);
-        a = a.wrapping_add(a << 3);
-        a = a ^ (a >> 4);
-        a = a.wrapping_mul(0x27d4eb2d);
-        a = a ^ (a >> 15);
-        (a & self.range_mask) as usize
+        (key.wrapping_mul(0x27d4eb2d) >> self.range_shift) as usize
     }
 }
 
@@ -215,7 +215,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     let uncompressed_length = try!(inp.available()) as u32;
     try!(write_varint(out, uncompressed_length));
     let max_block_len = cmp::min(options.block_size as u32, uncompressed_length);
-    let mut dict = Dict::new(max_block_len / 8);  // TODO Figure out capacity
+    let mut dict = Dict::new(max_block_len);
     let mut written = 0;
     loop {
         let mut len;
@@ -368,16 +368,21 @@ unsafe fn find_match_length(s1: *const u8, mut s2: *const u8, s2_limit: *const u
 
     let mut matched = 0;
     while s2 <= s2_limit.offset(-8) {
+        // We have more than 8 bytes available
         if load64(s2) == load64(s1.offset(matched as isize)) {
+            // They all matched
             s2 = s2.offset(8);
             matched += 8;
         } else {
+            // They didn't so the end of the matching prefix must be somewhere among them.
             let x = load64(s2) ^ load64(s1.offset(matched as isize));
+            // First non-zero bit is first non-matching bit
             let matching_bits = x.trailing_zeros();
             matched += matching_bits / 8;
             return matched;
         }
     }
+    // Handle remaining bytes
     while s2 < s2_limit {
         if *s1.offset(matched as isize) == *s2 {
             s2 = s2.offset(1);
