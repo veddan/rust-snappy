@@ -1,6 +1,6 @@
 [package]
 name = "snappy"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Viktor Dahl <pazaconyoman@gmail.com>"]
 build = "build.rs"
 
