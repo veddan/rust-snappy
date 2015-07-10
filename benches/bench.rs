@@ -4,7 +4,7 @@ extern crate test;
 extern crate rand;
 extern crate snappy;
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use rand::{weak_rng, Rng};
 use snappy::{compress, decompress};
 
