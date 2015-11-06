@@ -60,6 +60,7 @@ struct PositionQueue {
 }
 
 impl PositionQueue {
+    #[allow(dead_code)]
     fn new() -> PositionQueue {
         PositionQueue {
             queue: [0; MAX_CHAIN_LEN as usize],
@@ -218,7 +219,7 @@ pub fn compress_with_options<R: SnappyRead, W: Write>(inp: &mut R, out: &mut W,
     let mut dict = Dict::new(max_block_len);
     let mut written = 0;
     loop {
-        let mut len;
+        let len: usize;
         {
             let buf = match inp.fill_buf() {
                 Ok(b) if b.len() == 0 => return Ok(()),

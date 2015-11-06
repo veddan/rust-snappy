@@ -1,7 +1,7 @@
 extern crate rsnappy;
 
 use std::io::Cursor;
-use rsnappy::{decompress, SnappyWrite};
+use rsnappy::{decompress};
 
 macro_rules! decompress(
     ($input: expr, $output: expr) => (
