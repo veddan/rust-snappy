@@ -1,7 +1,10 @@
 [package]
 name = "rsnappy"
 version = "0.1.0"
+description="Pure rust implementation of the snappy compression algorithm"
 authors = ["Viktor Dahl <pazaconyoman@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/veddan/rust-snappy"
 build = "build.rs"
 
 [dev-dependencies]
