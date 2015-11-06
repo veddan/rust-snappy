@@ -2,11 +2,11 @@
 
 extern crate test;
 extern crate rand;
-extern crate snappy;
+extern crate rsnappy;
 
 use std::io::{Cursor, Read};
 use rand::{weak_rng, Rng};
-use snappy::{compress, decompress};
+use rsnappy::{compress, decompress};
 
 static TEXT: &'static str = include_str!("../tests/moonstone-short.txt");
 

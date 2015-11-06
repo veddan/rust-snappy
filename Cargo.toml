@@ -1,10 +1,10 @@
 [package]
-name = "snappy"
+name = "rsnappy"
 version = "0.1.0"
 authors = ["Viktor Dahl <pazaconyoman@gmail.com>"]
 build = "build.rs"
 
 [dev-dependencies]
-rand = "0.3.8"
+rand = "0.3.11"
 docopt = "0.6.67"
 rustc-serialize = "0.3.15"

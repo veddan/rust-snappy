@@ -62,7 +62,7 @@ fn write_benchmarks(out_dir: &Path) {
 fn do_write_benchmarks<I: IntoIterator<Item=(String, String)>>(out_dir: &Path, files: I) {
     let mut f = File::create(out_dir.join("generated-benches.rs")).unwrap();
     writeln!(f, "extern crate test;").unwrap();
-    writeln!(f, "extern crate snappy;").unwrap();
+    writeln!(f, "extern crate rsnappy;").unwrap();
     writeln!(f, "use std::io::{{Read, Cursor}};").unwrap();
     writeln!(f, "use std::path::Path;").unwrap();
     writeln!(f, "use std::fs::File;").unwrap();
@@ -75,7 +75,7 @@ fn bench_{}(bench: &mut test::Bencher) {{
     f.read_to_end(&mut input);
     let mut output = Vec::with_capacity(input.len() * 2);
     bench.iter(|| {{
-        snappy::compress(&mut Cursor::new(&input[..]), &mut output).unwrap();
+        rsnappy::compress(&mut Cursor::new(&input[..]), &mut output).unwrap();
         output.clear();
     }});
     bench.bytes = input.len() as u64;

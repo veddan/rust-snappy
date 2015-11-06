@@ -1,8 +1,8 @@
-extern crate snappy;
+extern crate rsnappy;
 
 use std::io::Cursor;
 use std::cmp;
-use snappy::{compress, decompress};
+use rsnappy::{compress, decompress};
 
 static TEXT: &'static str = include_str!("moonstone-short.txt");
 

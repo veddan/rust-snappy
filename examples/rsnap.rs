@@ -1,4 +1,4 @@
-extern crate snappy;
+extern crate rsnappy;
 extern crate rustc_serialize;
 extern crate docopt;
 
@@ -8,7 +8,7 @@ use std::path::Path;
 use std::fs::File;
 use std::default::Default;
 use std::process::exit;
-use snappy::{decompress, compress_with_options, CompressorOptions, MAX_BLOCK_SIZE};
+use rsnappy::{decompress, compress_with_options, CompressorOptions, MAX_BLOCK_SIZE};
 use docopt::Docopt;
 
 static USAGE: &'static str = "
