@@ -266,7 +266,7 @@ impl SnappyWrite for Vec<u8> {
                 self.set_len(new_len);
             }
         } else {
-            for i in (0..len as usize) {
+            for i in 0..len as usize {
                 let c = self[start + i];
                 self.push(c);
             }

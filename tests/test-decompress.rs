@@ -42,7 +42,7 @@ fn test_two_small_literals() {
 #[test]
 fn test_big_literal() {
     let mut expected_out = vec![];
-    for i in (0..1_000_000) { expected_out.push((i % 10) as u8); }
+    for i in 0..1_000_000 { expected_out.push((i % 10) as u8); }
     let mut input = vec![64 | 0x80, 4 | 0x80, 61, /* uncompressed length */
                         63 << 2 /* long 4-byte literal */,
                         0x3F, 0x42, 0x0F, 0x00 /* 1_000_000_000 in little endian */];
